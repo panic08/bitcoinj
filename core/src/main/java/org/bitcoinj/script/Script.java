@@ -223,7 +223,7 @@ public class Script {
     private final List<ScriptChunk> chunks;
     // Unfortunately, scripts are not ever re-serialized or canonicalized when used in signature hashing. Thus we
     // must preserve the exact bytes that we read off the wire, along with the parsed form.
-    private final byte[] program;
+    @Nullable private final byte[] program;
 
     // Creation time of the associated keys, or null if unknown.
     @Nullable private final Instant creationTime;
@@ -246,9 +246,7 @@ public class Script {
      * @return script that wraps the chunks
      */
     public static Script of(List<ScriptChunk> chunks, Instant creationTime) {
-        chunks = Collections.unmodifiableList(new ArrayList<>(chunks)); // defensive copy
-        Objects.requireNonNull(creationTime);
-        return new Script(null, chunks, creationTime);
+        return new Script(chunks, creationTime);
     }
 
     /**
@@ -274,18 +272,28 @@ public class Script {
      * @throws ScriptException if the program could not be parsed
      */
     public static Script parse(byte[] program, Instant creationTime) throws ScriptException {
-        Objects.requireNonNull(creationTime);
-        program = Arrays.copyOf(program, program.length); // defensive copy
-        List<ScriptChunk> chunks = new ArrayList<>(5); // common size
-        parseIntoChunks(program, chunks);
-        return new Script(program, chunks, creationTime);
+        return new Script(program, creationTime);
     }
 
     /**
      * To run a script, first we parse it which breaks it up into chunks representing pushes of data or logical
      * opcodes. Then we can run the parsed chunks.
+     * @param program program bytes to parse
+     * @return An unmodifiable list of chunks
      */
-    private static void parseIntoChunks(byte[] program, List<ScriptChunk> chunks) throws ScriptException {
+    private static List<ScriptChunk> parseIntoChunks(byte[] program) throws ScriptException {
+        List<ScriptChunk> chunks = new ArrayList<>();
+        parseIntoChunksPartial(program, chunks);
+        return Collections.unmodifiableList(chunks);
+    }
+
+    /**
+     * Parse a script program into a mutable List of chunks. If an exception is thrown a partial parsing
+     * will be present in the provided chunk list.
+     * @param program The script program
+     * @param chunks An empty, mutable array to fill with chunks
+     */
+    private static void parseIntoChunksPartial(byte[] program, List<ScriptChunk> chunks) throws ScriptException {
         ByteArrayInputStream bis = new ByteArrayInputStream(program);
         while (bis.available() > 0) {
             int opcode = bis.read();
@@ -326,9 +334,22 @@ public class Script {
         }
     }
 
-    private Script(byte[] programBytes, List<ScriptChunk> chunks, Instant creationTime) {
-        this.program = programBytes;
-        this.chunks = chunks;
+
+    // When constructing from a program, we store both program and chunks
+    private Script(byte[] program, Instant creationTime) {
+        Objects.requireNonNull(program);
+        Objects.requireNonNull(creationTime);
+        this.program = Arrays.copyOf(program, program.length); // defensive copy;
+        this.chunks = parseIntoChunks(this.program);
+        this.creationTime = creationTime;
+    }
+
+    // When constructing from chunks, we store only chunks, and generate program when getter is called
+    private Script(List<ScriptChunk> chunks, Instant creationTime) {
+        Objects.requireNonNull(chunks);
+        Objects.requireNonNull(creationTime);
+        this.program = null;
+        this.chunks = Collections.unmodifiableList(new ArrayList<>(chunks));    // defensive copy
         this.creationTime = creationTime;
     }
 
@@ -341,14 +362,13 @@ public class Script {
         if (program != null)
             // Don't round-trip as Bitcoin Core doesn't and it would introduce a mismatch.
             return Arrays.copyOf(program, program.length);
-        try {
-            ByteArrayOutputStream bos = new ByteArrayOutputStream();
-            for (ScriptChunk chunk : chunks) {
-                chunk.write(bos);
-            }
-            return bos.toByteArray();
-        } catch (IOException e) {
-            throw new RuntimeException(e);  // Cannot happen.
+        else {
+            int size = chunks.stream().mapToInt(ScriptChunk::size).sum();
+            ByteBuffer buf = ByteBuffer.allocate(size);
+            chunks.forEach(chunk ->
+                buf.put(chunk.toByteArray())
+            );
+            return buf.array();
         }
     }
 
@@ -685,7 +705,7 @@ public class Script {
     public static int getSigOpCount(byte[] program) throws ScriptException {
         List<ScriptChunk> chunks = new ArrayList<>(5); // common size
         try {
-            parseIntoChunks(program, chunks);
+            parseIntoChunksPartial(program, chunks);
         } catch (ScriptException e) {
             // Ignore errors and count up to the parse-able length
         }
@@ -698,7 +718,7 @@ public class Script {
     public static long getP2SHSigOpCount(byte[] scriptSig) throws ScriptException {
         List<ScriptChunk> chunks = new ArrayList<>(5); // common size
         try {
-            parseIntoChunks(scriptSig, chunks);
+            parseIntoChunksPartial(scriptSig, chunks);
         } catch (ScriptException e) {
             // Ignore errors and count up to the parse-able length
         }
